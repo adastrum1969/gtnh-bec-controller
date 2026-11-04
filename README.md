@@ -69,6 +69,8 @@ Two optional Redstone I/O signals can be added for automation around a batch. Bo
 
 If more than one Redstone I/O is connected to the computer, give each block its address in `config.cfg` (`redstoneReturnAddress`, `redstoneCraftStartAddress`, `redstoneCraftEndAddress`; run `components` in the OpenOS shell to list addresses). A signal without an address claims the first Redstone I/O that is still unused, so a setup with a single block keeps working unchanged and the two craft signals stay off until their blocks are added.
 
+To find out which block sits behind an address, set `identifyRedstone=true` in `config.cfg` and reboot: the controller pulses each Redstone I/O for 5 seconds in turn and shows the address it is pulsing on screen and in the log, so you can watch which wiring reacts. Set `identifyRedstone=false` again once the addresses are filled in. The addresses the controller settled on are printed on every startup anyway.
+
 ### The Input Subnet (Magenta)
 
 The Input Subnet is what provides the item inputs to each of the Teleporters.
@@ -189,6 +191,7 @@ every startup and updates itself automatically if one's available.
 - Auto-run on startup can be disabled in config
 - Auto-update can be disabled in config
 - Craft start/end redstone signals can be assigned to specific Redstone I/O blocks in config
+- `identifyRedstone` in config pulses each Redstone I/O in turn to work out which block is which
 - Discord Webhook integration can be setup in config.
 
 You can use Ctrl+Alt+C to exit the script if needed while it's running.

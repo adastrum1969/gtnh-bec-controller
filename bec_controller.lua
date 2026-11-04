@@ -32,6 +32,8 @@ local NANITE_CRAFT_POLL_INTERVAL = 0.05
 local DRIVE_MOVE_TIMEOUT = 1
 local DRIVE_MOVE_RETRY_INTERVAL = 0.05
 local REDSTONE_PULSE_DURATION = 0.2
+local IDENTIFY_REDSTONE_PULSE_DURATION = 5
+local IDENTIFY_REDSTONE_GAP = 2
 local REDSTONE_ROLES = { "returnDrives", "craftStart", "craftEnd" }
 local REDSTONE_ROLE_CONFIG = {
   returnDrives = "redstoneReturnAddress",
@@ -99,6 +101,7 @@ local CONFIG_DEFAULTS = {
   { "redstoneReturnAddress", "" },
   { "redstoneCraftStartAddress", "" },
   { "redstoneCraftEndAddress", "" },
+  { "identifyRedstone", false },
 }
 
 local config = {}
@@ -865,13 +868,15 @@ local function resolveRedstoneOutputs()
     end
   end
   for _, role in ipairs(REDSTONE_ROLES) do
-    if not redstoneOutputs[role] then log(LEVEL.DEBUG, "No Redstone I/O for the " .. REDSTONE_ROLE_LABELS[role] .. " signal.") end
+    if redstoneOutputs[role] then
+      log(LEVEL.INFO, "Redstone " .. REDSTONE_ROLE_LABELS[role] .. ": " .. redstoneOutputs[role])
+    else
+      log(LEVEL.DEBUG, "No Redstone I/O for the " .. REDSTONE_ROLE_LABELS[role] .. " signal.")
+    end
   end
 end
 
-local function pulseRedstone(role)
-  local address = redstoneOutputs[role]
-  if not address then return false, "no Redstone I/O assigned" end
+local function pulseRedstoneAddress(address, duration)
   local redstone = component.proxy(address)
   if not redstone then return false, "Redstone I/O " .. address .. " is unavailable" end
   local function setAll(level)
@@ -881,10 +886,39 @@ local function pulseRedstone(role)
   end
   local ok, err = setAll(15)
   if not ok then return false, "setOutput high failed: " .. tostring(err) end
-  os.sleep(REDSTONE_PULSE_DURATION)
+  os.sleep(duration)
   ok, err = setAll(0)
   if not ok then return false, "setOutput low failed: " .. tostring(err) end
   return true
+end
+
+local function pulseRedstone(role)
+  local address = redstoneOutputs[role]
+  if not address then return false, "no Redstone I/O assigned" end
+  return pulseRedstoneAddress(address, REDSTONE_PULSE_DURATION)
+end
+
+-- Long pulse per block, in address order, so each address can be matched to the
+-- wiring that reacts to it.
+local function identifyRedstoneOutputs()
+  local list = addresses("redstone")
+  if #list == 0 then
+    log(LEVEL.WARN, "identifyRedstone is enabled but no Redstone I/O is connected.")
+    return
+  end
+  log(LEVEL.INFO, "Identifying " .. #list .. " Redstone I/O(s) - watch what lights up for each address.")
+  for i, address in ipairs(list) do
+    local label = "unassigned"
+    for _, role in ipairs(REDSTONE_ROLES) do
+      if redstoneOutputs[role] == address then label = REDSTONE_ROLE_LABELS[role] end
+    end
+    setPhase(string.format("Identifying Redstone %d/%d (%s)", i, #list, label))
+    log(LEVEL.INFO, string.format("Redstone %d/%d (%s): %s", i, #list, label, address))
+    local ok, err = pulseRedstoneAddress(address, IDENTIFY_REDSTONE_PULSE_DURATION)
+    if not ok then log(LEVEL.WARN, "Identify pulse failed: " .. tostring(err)) end
+    os.sleep(IDENTIFY_REDSTONE_GAP)
+  end
+  log(LEVEL.INFO, "Identification done - set the addresses in config.cfg and set identifyRedstone=false.")
 end
 
 -- Only the drive-return pulse is required; the craft signals are optional extras.
@@ -1156,6 +1190,7 @@ local function startup()
 
   setPhase("Starting Up (Finding Redstone Signals)")
   resolveRedstoneOutputs()
+  if config.identifyRedstone then identifyRedstoneOutputs() end
 
   setPhase("Starting Up (Registering Autorun)")
   if config.enableAutoStart then ensureAutorun() else removeAutorun() end
