@@ -12,7 +12,7 @@ local event = require("event")
 local filesystem = require("filesystem")
 local serialization = require("serialization")
 
-local VERSION = "3"
+local VERSION = "4"
 local SCRIPT_PATH = "/home/bec_controller.lua"
 local SHRC_PATH = "/home/.shrc"
 local CONFIG_PATH = "/home/config.cfg"
@@ -48,6 +48,7 @@ local REDSTONE_ROLE_LABELS = {
 local NANITE_POLL_INTERVAL = 0.3
 local GATE_POLL_INTERVAL = 0.5
 local INPUT_SETTLE_TIME = 0.5
+local NEXT_RECIPE_SETTLE_TIMEOUT = 5
 local NODE_STARTUP_TIMEOUT = 30
 local NODE_STARTUP_POLL_INTERVAL = 0.3
 local TIER_SWAP_FAILURE_TIMEOUT = 30
@@ -460,6 +461,10 @@ local function isFluidEntry(entry)
   return entry.amount ~= nil and entry.damage == nil
 end
 
+local function entryCount(entry)
+  return entry.size or entry.amount or 0
+end
+
 local function itemKey(entry)
   return entry.name .. ":" .. tostring(entry.damage)
 end
@@ -535,12 +540,14 @@ local function checkDiodeCapacity(fluidCount, what)
 end
 
 -- Returns nil while the Input Subnet is empty, or nil plus a reason when it can't be read.
-local function tryIdentifyRecipe()
+-- allowUnmatched returns nil plus a reason for a stock that is not a full pattern yet,
+-- which happens while AE2 is still pushing a recipe.
+local function tryIdentifyRecipe(allowUnmatched)
   local items, err = inputItems()
   if not items then return nil, err end
   if #items == 0 then return nil end
   local stock = {}
-  for _, item in ipairs(items) do stock[itemKey(item)] = (stock[itemKey(item)] or 0) + item.size end
+  for _, item in ipairs(items) do stock[itemKey(item)] = (stock[itemKey(item)] or 0) + entryCount(item) end
 
   local function findMatch(patterns)
     for _, pattern in ipairs(patterns) do
@@ -549,8 +556,10 @@ local function tryIdentifyRecipe()
     end
   end
   local matched, copies = findMatch(getRecipePatterns(false))
-  if not matched then matched, copies = findMatch(getRecipePatterns(true)) end
+  -- The relaxed lookup runs in a retry loop, so leave the cache alone until it settles.
+  if not matched and not allowUnmatched then matched, copies = findMatch(getRecipePatterns(true)) end
   if not matched then
+    if allowUnmatched then return nil, "Input Subnet items do not match a recipe pattern yet" end
     local described = {}
     for key, amount in pairs(stock) do table.insert(described, key .. " x" .. amount) end
     fatalError("Input Subnet has items but no recipe pattern matches (possible mixed recipe): " .. table.concat(described, ", "))
@@ -592,6 +601,22 @@ local function waitForRecipe()
     end
   end
   return recipe
+end
+
+-- Returns the recipe AE2 pushed while the last batch was running, or nil when the
+-- Input Subnet is empty. Retries briefly so a half-delivered stock is never matched
+-- against the wrong pattern.
+local function pendingRecipe()
+  os.sleep(INPUT_SETTLE_TIME)
+  local deadline = computer.uptime() + NEXT_RECIPE_SETTLE_TIMEOUT
+  while true do
+    local recipe, err = tryIdentifyRecipe(true)
+    if recipe then return recipe end
+    if not err then return nil end
+    if computer.uptime() >= deadline then return tryIdentifyRecipe() end
+    log(LEVEL.DEBUG, err .. " - waiting for the Input Subnet to settle.")
+    os.sleep(INPUT_SETTLE_TIME)
+  end
 end
 
 local function splitParallels(totalCopies, nodeAddresses)
@@ -956,30 +981,39 @@ local function finishBatch(assignments, recipe, batchStartUptime)
   status.currentTier = nil
   log(LEVEL.DEBUG, "Nanites extracted.")
 
-  local remaining = inputItems()
-  if not remaining then fatalError("could not verify Input Subnet is empty after the batch") end
-  local remainingCount = 0
-  for _, item in ipairs(remaining) do remainingCount = remainingCount + item.size end
-  if remainingCount > 0 then
-    fatalError("Input Subnet still has " .. remainingCount .. " item(s) after the batch - refusing to return drives to Pending Subnet.")
-  end
-
   setPhase("Signalling craft end")
   pulseOptionalRedstone("craftEnd")
+
+  local remaining, remainingErr = inputItems()
+  if not remaining then fatalError("could not verify Input Subnet is empty after the batch: " .. tostring(remainingErr)) end
+  local remainingCount, described = 0, {}
+  for _, item in ipairs(remaining) do
+    local count = entryCount(item)
+    remainingCount = remainingCount + count
+    table.insert(described, tostring(item.label or item.name) .. " x" .. count)
+  end
+  if remainingCount > 0 then
+    -- AE2 refills the subnet as soon as the nodes take their items, so this is normally
+    -- the next recipe waiting: keep the drives in place and craft it next.
+    log(LEVEL.INFO, "Input Subnet already holds " .. remainingCount .. " item(s) after the batch: " .. table.concat(described, ", "))
+    return remainingCount
+  end
 
   setPhase("Returning input drives")
   ok, err = pulseRedstone("returnDrives")
   if not ok then fatalError("redstone pulse: " .. tostring(err)) end
   log(LEVEL.DEBUG, "Drive-return pulse sent.")
+  return 0
 end
 
+-- Returns the number of items left in the Input Subnet, which the next batch picks up.
 local function runBatch(assignments, recipe, batchStartUptime)
   status.recipeName = recipe and recipe.name
   status.recipeOutputCount = recipe and recipe.outputCount
   setPhase("Crafting")
   log(LEVEL.INFO, "Crafting...")
   superviseCrafting(assignments)
-  finishBatch(assignments, recipe, batchStartUptime)
+  return finishBatch(assignments, recipe, batchStartUptime)
 end
 
 local function waitForCondensate(recipe)
@@ -1049,33 +1083,38 @@ local function runOneCycle()
   status.recipeName, status.recipeOutputCount, status.currentTier, status.progressPercent = nil, nil, nil, nil
   render()
 
+  local leftovers = 0
   local resumed = findInProgressAssignments()
   if #resumed > 0 then
     logSeparator()
     log(LEVEL.WARN, "Resuming " .. #resumed .. " in-progress IONode(s) from before restart.")
     setPhase("Setting Diode filters (resumed)")
     setDiodeFiltersFromNodes(resumed)
-    runBatch(resumed, nil, computer.uptime())
-    return
+    leftovers = runBatch(resumed, nil, computer.uptime())
   end
 
-  local recipe = waitForRecipe()
-  local batchStartUptime = computer.uptime()
-  status.recipeName, status.recipeOutputCount = recipe.name, recipe.outputCount
-  logSeparator()
-  log(LEVEL.INFO, recipe.name .. " x" .. recipe.outputCount)
+  -- A batch that ends with items already in the Input Subnet hands them straight to the
+  -- next one, so back-to-back AE2 requests don't have to wait for a redstone trigger.
+  local recipe = (leftovers > 0) and pendingRecipe() or waitForRecipe()
+  while recipe do
+    local batchStartUptime = computer.uptime()
+    status.recipeName, status.recipeOutputCount = recipe.name, recipe.outputCount
+    logSeparator()
+    log(LEVEL.INFO, recipe.name .. " x" .. recipe.outputCount)
 
-  setPhase("Splitting parallels")
-  local nodes = addresses("bec_io_node")
-  if #nodes == 0 then fatalError("no IONodes found") end
-  local assignments = splitParallels(recipe.copies, nodes)
-  for _, a in ipairs(assignments) do log(LEVEL.DEBUG, "assign " .. a.address .. " -> " .. a.count) end
+    setPhase("Splitting parallels")
+    local nodes = addresses("bec_io_node")
+    if #nodes == 0 then fatalError("no IONodes found") end
+    local assignments = splitParallels(recipe.copies, nodes)
+    for _, a in ipairs(assignments) do log(LEVEL.DEBUG, "assign " .. a.address .. " -> " .. a.count) end
 
-  waitForCondensate(recipe)
-  setPhase("Signalling craft start")
-  pulseOptionalRedstone("craftStart")
-  startNodes(assignments)
-  runBatch(assignments, recipe, batchStartUptime)
+    waitForCondensate(recipe)
+    setPhase("Signalling craft start")
+    pulseOptionalRedstone("craftStart")
+    startNodes(assignments)
+    if runBatch(assignments, recipe, batchStartUptime) == 0 then return end
+    recipe = pendingRecipe()
+  end
 end
 
 -- Startup

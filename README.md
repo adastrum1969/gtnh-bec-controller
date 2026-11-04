@@ -65,7 +65,7 @@ Add an OpenComputers Redstone I/O next to the hulls, connect it to the Controlle
 Two optional Redstone I/O signals can be added for automation around a batch. Both drive all six sides of their own Redstone I/O high for 0.2s:
 
 - **Craft start** - pulses right before the IONodes are enabled and pull their items in.
-- **Craft end** - pulses once the batch is finished and cleaned up, just before the input drives are returned.
+- **Craft end** - pulses once the batch is finished and cleaned up, whether or not the input drives are returned afterwards.
 
 If more than one Redstone I/O is connected to the computer, give each block its address in `config.cfg` (`redstoneReturnAddress`, `redstoneCraftStartAddress`, `redstoneCraftEndAddress`; run `components` in the OpenOS shell to list addresses). A signal without an address claims the first Redstone I/O that is still unused, so a setup with a single block keeps working unchanged and the two craft signals stay off until their blocks are added.
 
@@ -192,6 +192,7 @@ every startup and updates itself automatically if one's available.
 - Auto-update can be disabled in config
 - Craft start/end redstone signals can be assigned to specific Redstone I/O blocks in config
 - `identifyRedstone` in config pulses each Redstone I/O in turn to work out which block is which
+- Recipes that AE2 pushes back-to-back are picked up automatically: if the Input Subnet already holds the next recipe when a batch ends, the input drives stay in place and that recipe is crafted next
 - Discord Webhook integration can be setup in config.
 
 You can use Ctrl+Alt+C to exit the script if needed while it's running.
