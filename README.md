@@ -62,6 +62,13 @@ Back at the Pending Subnet, place 4 high-tier conveyors on the sides of the hull
 
 Add an OpenComputers Redstone I/O next to the hulls, connect it to the Controller Covers with red alloy wire.
 
+Two optional Redstone I/O signals can be added for automation around a batch. Both drive all six sides of their own Redstone I/O high for 0.2s:
+
+- **Craft start** - pulses right before the IONodes are enabled and pull their items in.
+- **Craft end** - pulses once the batch is finished and cleaned up, just before the input drives are returned.
+
+If more than one Redstone I/O is connected to the computer, give each block its address in `config.cfg` (`redstoneReturnAddress`, `redstoneCraftStartAddress`, `redstoneCraftEndAddress`; run `components` in the OpenOS shell to list addresses). A signal without an address claims the first Redstone I/O that is still unused, so a setup with a single block keeps working unchanged and the two craft signals stay off until their blocks are added.
+
 ### The Input Subnet (Magenta)
 
 The Input Subnet is what provides the item inputs to each of the Teleporters.
@@ -181,6 +188,7 @@ every startup and updates itself automatically if one's available.
 
 - Auto-run on startup can be disabled in config
 - Auto-update can be disabled in config
+- Craft start/end redstone signals can be assigned to specific Redstone I/O blocks in config
 - Discord Webhook integration can be setup in config.
 
 You can use Ctrl+Alt+C to exit the script if needed while it's running.

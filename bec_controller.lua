@@ -32,6 +32,17 @@ local NANITE_CRAFT_POLL_INTERVAL = 0.05
 local DRIVE_MOVE_TIMEOUT = 1
 local DRIVE_MOVE_RETRY_INTERVAL = 0.05
 local REDSTONE_PULSE_DURATION = 0.2
+local REDSTONE_ROLES = { "returnDrives", "craftStart", "craftEnd" }
+local REDSTONE_ROLE_CONFIG = {
+  returnDrives = "redstoneReturnAddress",
+  craftStart = "redstoneCraftStartAddress",
+  craftEnd = "redstoneCraftEndAddress",
+}
+local REDSTONE_ROLE_LABELS = {
+  returnDrives = "drive return",
+  craftStart = "craft start",
+  craftEnd = "craft end",
+}
 local NANITE_POLL_INTERVAL = 0.3
 local GATE_POLL_INTERVAL = 0.5
 local INPUT_SETTLE_TIME = 0.5
@@ -85,12 +96,16 @@ local CONFIG_DEFAULTS = {
   { "discordWebhookURL", "" },
   { "errorPingUserID", "" },
   { "onlySendErrors", false },
+  { "redstoneReturnAddress", "" },
+  { "redstoneCraftStartAddress", "" },
+  { "redstoneCraftEndAddress", "" },
 }
 
 local config = {}
 for _, entry in ipairs(CONFIG_DEFAULTS) do config[entry[1]] = entry[2] end
 
 local status = { phase = "Starting up" }
+local redstoneOutputs = {}
 
 local function firstComponent(componentType)
   for address in component.list(componentType, true) do
@@ -799,9 +814,66 @@ local function superviseCrafting(assignments)
   end
 end
 
-local function pulseRedstoneReturnDrives()
-  local address, redstone = firstComponent("redstone")
-  if not address then return false, "no redstone component found" end
+-- Redstone I/O blocks each drive one dedicated signal. config.cfg can pin a block by
+-- address; roles without one claim the first Redstone I/O that is still unused.
+local function findRedstoneByHint(hint)
+  local lowerHint = hint:lower()
+  local list = addresses("redstone")
+  for _, address in ipairs(list) do
+    if address:lower() == lowerHint then return address end
+  end
+  -- A unique address prefix is enough, since components are listed in full.
+  local match
+  for _, address in ipairs(list) do
+    if address:lower():sub(1, #lowerHint) == lowerHint then
+      if match then return nil end
+      match = address
+    end
+  end
+  return match
+end
+
+local function resolveRedstoneOutputs()
+  redstoneOutputs = {}
+  local claimed = {}
+  local unassigned = {}
+  for _, role in ipairs(REDSTONE_ROLES) do
+    local hint = (config[REDSTONE_ROLE_CONFIG[role]] or ""):match("^%s*(.-)%s*$")
+    if hint == "" then
+      table.insert(unassigned, role)
+    else
+      local address = findRedstoneByHint(hint)
+      if not address then
+        log(LEVEL.WARN, "No Redstone I/O with address " .. hint .. " for the " .. REDSTONE_ROLE_LABELS[role] .. " signal - that pulse is disabled.")
+      elseif claimed[address] then
+        log(LEVEL.WARN, "Redstone I/O " .. address .. " is already used for another signal - the " .. REDSTONE_ROLE_LABELS[role] .. " pulse is disabled.")
+      else
+        redstoneOutputs[role] = address
+        claimed[address] = true
+      end
+    end
+  end
+  local list = addresses("redstone")
+  for _, role in ipairs(unassigned) do
+    for _, address in ipairs(list) do
+      if not claimed[address] then
+        redstoneOutputs[role] = address
+        claimed[address] = true
+        log(LEVEL.DEBUG, "Unconfigured Redstone I/O " .. address .. " drives the " .. REDSTONE_ROLE_LABELS[role] .. " signal.")
+        break
+      end
+    end
+  end
+  for _, role in ipairs(REDSTONE_ROLES) do
+    if not redstoneOutputs[role] then log(LEVEL.DEBUG, "No Redstone I/O for the " .. REDSTONE_ROLE_LABELS[role] .. " signal.") end
+  end
+end
+
+local function pulseRedstone(role)
+  local address = redstoneOutputs[role]
+  if not address then return false, "no Redstone I/O assigned" end
+  local redstone = component.proxy(address)
+  if not redstone then return false, "Redstone I/O " .. address .. " is unavailable" end
   local function setAll(level)
     local levels = {}
     for side = 0, 5 do levels[side] = level end
@@ -813,6 +885,17 @@ local function pulseRedstoneReturnDrives()
   ok, err = setAll(0)
   if not ok then return false, "setOutput low failed: " .. tostring(err) end
   return true
+end
+
+-- Only the drive-return pulse is required; the craft signals are optional extras.
+local function pulseOptionalRedstone(role)
+  if not redstoneOutputs[role] then return end
+  local ok, err = pulseRedstone(role)
+  if ok then
+    log(LEVEL.DEBUG, "Redstone " .. REDSTONE_ROLE_LABELS[role] .. " pulse sent.")
+  else
+    log(LEVEL.WARN, "Redstone " .. REDSTONE_ROLE_LABELS[role] .. " pulse failed: " .. tostring(err))
+  end
 end
 
 -- recipe is nil for a batch resumed after a restart.
@@ -847,8 +930,11 @@ local function finishBatch(assignments, recipe, batchStartUptime)
     fatalError("Input Subnet still has " .. remainingCount .. " item(s) after the batch - refusing to return drives to Pending Subnet.")
   end
 
+  setPhase("Signalling craft end")
+  pulseOptionalRedstone("craftEnd")
+
   setPhase("Returning input drives")
-  ok, err = pulseRedstoneReturnDrives()
+  ok, err = pulseRedstone("returnDrives")
   if not ok then fatalError("redstone pulse: " .. tostring(err)) end
   log(LEVEL.DEBUG, "Drive-return pulse sent.")
 end
@@ -952,6 +1038,8 @@ local function runOneCycle()
   for _, a in ipairs(assignments) do log(LEVEL.DEBUG, "assign " .. a.address .. " -> " .. a.count) end
 
   waitForCondensate(recipe)
+  setPhase("Signalling craft start")
+  pulseOptionalRedstone("craftStart")
   startNodes(assignments)
   runBatch(assignments, recipe, batchStartUptime)
 end
@@ -1065,6 +1153,9 @@ end
 local function startup()
   setPhase("Starting Up (Loading Config)")
   loadConfig()
+
+  setPhase("Starting Up (Finding Redstone Signals)")
+  resolveRedstoneOutputs()
 
   setPhase("Starting Up (Registering Autorun)")
   if config.enableAutoStart then ensureAutorun() else removeAutorun() end
