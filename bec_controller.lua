@@ -12,7 +12,7 @@ local event = require("event")
 local filesystem = require("filesystem")
 local serialization = require("serialization")
 
-local VERSION = "2"
+local VERSION = "3"
 local SCRIPT_PATH = "/home/bec_controller.lua"
 local SHRC_PATH = "/home/.shrc"
 local CONFIG_PATH = "/home/config.cfg"
