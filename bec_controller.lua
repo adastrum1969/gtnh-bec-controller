@@ -1202,10 +1202,12 @@ local function runRedstoneSetup()
   local selected = 1
   local rowCount = #REDSTONE_ROLES + 1
   local message
+  local hitAreas = {}
 
   local function draw()
     local width, height = clearScreen()
     if not width then return end
+    hitAreas = {}
     local function put(x, y, text, color)
       if color then pcall(gpu.setForeground, color) end
       pcall(gpu.set, x, y, tostring(text):sub(1, math.max(0, width - x + 1)))
@@ -1241,6 +1243,7 @@ local function runRedstoneSetup()
         text = text:sub(1, 8) .. "..." .. suffix
       end
       put(16, y, text, color)
+      table.insert(hitAreas, { y = y, x1 = 1, x2 = width, action = "role", index = row })
     end
 
     local toggleY = firstRow + #REDSTONE_ROLES
@@ -1249,6 +1252,7 @@ local function runRedstoneSetup()
     if toggleSelected then pcall(gpu.fill, 1, toggleY, width, 1, " ") end
     put(2, toggleY, "Auto-assign unused blocks:", toggleSelected and 0xFFFFFF or 0xCCCCCC)
     put(29, toggleY, config.redstoneAutoAssign and "on" or "off", config.redstoneAutoAssign and 0x99DD99 or 0xFF8866)
+    table.insert(hitAreas, { y = toggleY, x1 = 1, x2 = width, action = "toggle" })
     pcall(gpu.setBackground, 0x000000)
 
     local headingY = toggleY + 2
@@ -1277,7 +1281,13 @@ local function runRedstoneSetup()
       end
     end
     put(2, height - 1, "Up/Down select  Left/Right change  Enter cycle", 0x888888)
-    put(2, height, "T pulse  S save  Q cancel", 0x888888)
+    local bx = 2
+    for _, button in ipairs({ { "T", "pulse", "pulse" }, { "S", "save", "save" }, { "Q", "leave", "leave" } }) do
+      local label = "[" .. button[1] .. " " .. button[2] .. "]"
+      put(bx, height, label, 0xCCCCCC)
+      table.insert(hitAreas, { y = height, x1 = bx, x2 = bx + #label - 1, action = button[3] })
+      bx = bx + #label + 2
+    end
     pcall(gpu.setBackground, 0x000000)
   end
 
@@ -1335,10 +1345,41 @@ local function runRedstoneSetup()
     return true
   end
 
+  local function areaAt(x, y)
+    for _, area in ipairs(hitAreas) do
+      if y == area.y and x >= area.x1 and x <= area.x2 then return area end
+    end
+  end
+
+  local function activate(area)
+    if not area then return end
+    if area.action == "role" then
+      if selected == area.index then
+        cycleRole(REDSTONE_ROLES[area.index], 1)
+      else
+        selected = area.index
+      end
+      message = nil
+    elseif area.action == "toggle" then
+      selected = rowCount
+      config.redstoneAutoAssign = not config.redstoneAutoAssign
+      message = nil
+    elseif area.action == "pulse" then
+      pulseSelected()
+    elseif area.action == "save" then
+      if saveAndExit() then return "saved" end
+    elseif area.action == "leave" then
+      return "exit"
+    end
+  end
+
   draw()
   while true do
-    local name, _, char, code = event.pull()
+    local name, _, arg1, arg2 = event.pull()
     if name == "key_down" then
+      local char, code = arg1, arg2
+      if type(char) == "number" and char >= 0 and char < 256 then char = string.char(math.floor(char)) end
+      log(LEVEL.DEBUG, "Setup screen key: code=" .. tostring(code) .. " char=" .. tostring(char))
       if code == 200 then
         selected = (selected - 2) % rowCount + 1
         message = nil
@@ -1355,13 +1396,20 @@ local function runRedstoneSetup()
         message = nil
       elseif code == 1 then
         return false
-      elseif char == "s" or char == "S" then
+        -- Key codes cover keyboards that don't report a usable character for letters.
+      elseif code == 31 or char == "s" or char == "S" then
         if saveAndExit() then return true end
-      elseif char == "q" or char == "Q" then
+      elseif code == 16 or char == "q" or char == "Q" then
         return false
-      elseif char == "t" or char == "T" then
+      elseif code == 20 or char == "t" or char == "T" then
         pulseSelected()
       end
+      draw()
+    elseif name == "touch" or name == "screen_touch" then
+      local x, y = tonumber(arg1), tonumber(arg2)
+      local result = x and y and activate(areaAt(x, y))
+      if result == "saved" then return true end
+      if result == "exit" then return false end
       draw()
     elseif name == "screen_resized" or name == "component_added" or name == "component_removed" then
       draw()
