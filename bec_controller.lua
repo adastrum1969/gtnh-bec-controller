@@ -32,6 +32,7 @@ local NANITE_CRAFT_POLL_INTERVAL = 0.05
 local DRIVE_MOVE_TIMEOUT = 1
 local DRIVE_MOVE_RETRY_INTERVAL = 0.05
 local REDSTONE_PULSE_DURATION = 0.2
+local CONFIG_SCREEN_PULSE_DURATION = 3
 local IDENTIFY_REDSTONE_PULSE_DURATION = 5
 local IDENTIFY_REDSTONE_GAP = 2
 local REDSTONE_ROLES = { "returnDrives", "craftStart", "craftEnd" }
@@ -102,6 +103,7 @@ local CONFIG_DEFAULTS = {
   { "redstoneReturnAddress", "" },
   { "redstoneCraftStartAddress", "" },
   { "redstoneCraftEndAddress", "" },
+  { "redstoneAutoAssign", true },
   { "identifyRedstone", false },
 }
 
@@ -861,12 +863,16 @@ local function findRedstoneByHint(hint)
   return match
 end
 
+local function redstoneHint(role)
+  return (config[REDSTONE_ROLE_CONFIG[role]] or ""):match("^%s*(.-)%s*$")
+end
+
 local function resolveRedstoneOutputs()
   redstoneOutputs = {}
   local claimed = {}
   local unassigned = {}
   for _, role in ipairs(REDSTONE_ROLES) do
-    local hint = (config[REDSTONE_ROLE_CONFIG[role]] or ""):match("^%s*(.-)%s*$")
+    local hint = redstoneHint(role)
     if hint == "" then
       table.insert(unassigned, role)
     else
@@ -882,15 +888,19 @@ local function resolveRedstoneOutputs()
     end
   end
   local list = addresses("redstone")
-  for _, role in ipairs(unassigned) do
-    for _, address in ipairs(list) do
-      if not claimed[address] then
-        redstoneOutputs[role] = address
-        claimed[address] = true
-        log(LEVEL.DEBUG, "Unconfigured Redstone I/O " .. address .. " drives the " .. REDSTONE_ROLE_LABELS[role] .. " signal.")
-        break
+  if config.redstoneAutoAssign then
+    for _, role in ipairs(unassigned) do
+      for _, address in ipairs(list) do
+        if not claimed[address] then
+          redstoneOutputs[role] = address
+          claimed[address] = true
+          log(LEVEL.DEBUG, "Unconfigured Redstone I/O " .. address .. " drives the " .. REDSTONE_ROLE_LABELS[role] .. " signal.")
+          break
+        end
       end
     end
+  elseif #unassigned > 0 then
+    log(LEVEL.DEBUG, "redstoneAutoAssign is off - " .. #unassigned .. " signal(s) left unassigned.")
   end
   for _, role in ipairs(REDSTONE_ROLES) do
     if redstoneOutputs[role] then
@@ -1140,6 +1150,225 @@ local function loadConfig()
   file:close()
 end
 
+local function saveConfig()
+  local file = io.open(CONFIG_PATH, "w")
+  if not file then return false, "could not open " .. CONFIG_PATH .. " for writing" end
+  for _, entry in ipairs(CONFIG_DEFAULTS) do
+    file:write(entry[1] .. "=" .. tostring(config[entry[1]]) .. "\n")
+  end
+  file:close()
+  return true
+end
+
+-- Mirrors resolveRedstoneOutputs() so the setup screen previews what a restart will use.
+local function previewRedstoneOutputs()
+  local result, claimed = {}, {}
+  local unassigned = {}
+  local list = addresses("redstone")
+  for _, role in ipairs(REDSTONE_ROLES) do
+    local hint = redstoneHint(role)
+    if hint == "" then
+      table.insert(unassigned, role)
+    else
+      local address = findRedstoneByHint(hint)
+      if address and not claimed[address] then
+        result[role] = address
+        claimed[address] = true
+      end
+    end
+  end
+  if config.redstoneAutoAssign then
+    for _, role in ipairs(unassigned) do
+      for _, address in ipairs(list) do
+        if not claimed[address] then
+          result[role] = address
+          claimed[address] = true
+          break
+        end
+      end
+    end
+  end
+  return result, list
+end
+
+-- Redstone setup screen, opened from the shell with "bec_controller config".
+local function runRedstoneSetup()
+  if not gpu or not clearScreen() then
+    print("No usable screen - set the addresses in " .. CONFIG_PATH .. " instead.")
+    for _, address in ipairs(addresses("redstone")) do print("Redstone I/O: " .. address) end
+    return nil
+  end
+
+  local selected = 1
+  local rowCount = #REDSTONE_ROLES + 1
+  local message
+
+  local function draw()
+    local width, height = clearScreen()
+    if not width then return end
+    local function put(x, y, text, color)
+      if color then pcall(gpu.setForeground, color) end
+      pcall(gpu.set, x, y, tostring(text):sub(1, math.max(0, width - x + 1)))
+    end
+
+    local resolved, blocks = previewRedstoneOutputs()
+    pcall(gpu.setBackground, 0x000000)
+    put(2, 1, "BEC Controller - Redstone I/O Setup", 0x66CCFF)
+    if message then put(2, 2, message, 0xFFFF66) end
+
+    local firstRow = 4
+    for row, role in ipairs(REDSTONE_ROLES) do
+      local y = firstRow + row - 1
+      local isSelected = selected == row
+      pcall(gpu.setBackground, isSelected and 0x2B4C7E or 0x000000)
+      if isSelected then pcall(gpu.fill, 1, y, width, 1, " ") end
+      put(2, y, REDSTONE_ROLE_LABELS[role] .. ":", isSelected and 0xFFFFFF or 0xCCCCCC)
+
+      local hint = redstoneHint(role)
+      local text, color
+      if hint ~= "" then
+        if resolved[role] then text, color = resolved[role], 0x99DD99
+        else text, color = hint .. " (not found)", 0xFF8866 end
+      elseif resolved[role] then
+        text, color = resolved[role] .. " (auto)", 0xAAAAAA
+      else
+        text, color = "off", 0xFF8866
+      end
+      if #text > width - 16 then
+        local suffix = ""
+        if hint == "" and resolved[role] then suffix = " (auto)"
+        elseif hint ~= "" and not resolved[role] then suffix = " (not found)" end
+        text = text:sub(1, 8) .. "..." .. suffix
+      end
+      put(16, y, text, color)
+    end
+
+    local toggleY = firstRow + #REDSTONE_ROLES
+    local toggleSelected = selected == rowCount
+    pcall(gpu.setBackground, toggleSelected and 0x2B4C7E or 0x000000)
+    if toggleSelected then pcall(gpu.fill, 1, toggleY, width, 1, " ") end
+    put(2, toggleY, "Auto-assign unused blocks:", toggleSelected and 0xFFFFFF or 0xCCCCCC)
+    put(29, toggleY, config.redstoneAutoAssign and "on" or "off", config.redstoneAutoAssign and 0x99DD99 or 0xFF8866)
+    pcall(gpu.setBackground, 0x000000)
+
+    local headingY = toggleY + 2
+    local listBottom = height - 2
+    if listBottom > headingY then
+      put(2, headingY, "Detected Redstone I/O (" .. #blocks .. "):", 0x66CCFF)
+      if #blocks == 0 then
+        put(3, headingY + 1, "none connected", 0x888888)
+      else
+        local blockRole = {}
+        for role, address in pairs(resolved) do
+          blockRole[address] = REDSTONE_ROLE_LABELS[role] .. (redstoneHint(role) == "" and " (auto)" or "")
+        end
+        for i, address in ipairs(blocks) do
+          local y = headingY + i
+          if y > listBottom then
+            put(3, listBottom, "+" .. (#blocks - i + 1) .. " more...", 0x888888)
+            break
+          end
+          local role = blockRole[address]
+          local line = address .. "  " .. (role or "unused")
+          -- Narrow screens keep the readable signal name instead of a cut-off address.
+          if #line > width - 2 then line = address:sub(1, 8) .. "...  " .. (role or "unused") end
+          put(3, y, line, role and 0xDDDDDD or 0x888888)
+        end
+      end
+    end
+    put(2, height - 1, "Up/Down select  Left/Right change  Enter cycle", 0x888888)
+    put(2, height, "T pulse  S save  Q cancel", 0x888888)
+    pcall(gpu.setBackground, 0x000000)
+  end
+
+  local function cycleRole(role, step)
+    local options, used = { "" }, {}
+    for _, other in ipairs(REDSTONE_ROLES) do
+      if other ~= role then
+        local hint = redstoneHint(other)
+        if hint ~= "" then used[hint:lower()] = true end
+      end
+    end
+    for _, address in ipairs(addresses("redstone")) do
+      if not used[address:lower()] then table.insert(options, address) end
+    end
+    local current = redstoneHint(role):lower()
+    local index = 1
+    for i, address in ipairs(options) do
+      if address:lower() == current then index = i end
+    end
+    config[REDSTONE_ROLE_CONFIG[role]] = options[(index - 1 + step) % #options + 1]
+  end
+
+  local function pulseSelected()
+    local role = REDSTONE_ROLES[selected]
+    if not role then
+      message = "Select a signal to pulse."
+      draw()
+      return
+    end
+    local resolved = previewRedstoneOutputs()
+    local address = resolved[role]
+    if not address then
+      message = "No Redstone I/O assigned to the " .. REDSTONE_ROLE_LABELS[role] .. " signal."
+      draw()
+      return
+    end
+    message = "Pulsing " .. address .. " for " .. CONFIG_SCREEN_PULSE_DURATION .. "s - watch the wiring."
+    draw()
+    local ok, err = pulseRedstoneAddress(address, CONFIG_SCREEN_PULSE_DURATION)
+    message = ok and ("Pulsed " .. address .. ".") or ("Pulse failed: " .. tostring(err))
+    draw()
+  end
+
+  local function saveAndExit()
+    local ok, err = saveConfig()
+    if not ok then
+      message = "Save failed: " .. tostring(err)
+      draw()
+      return false
+    end
+    log(LEVEL.INFO, "Redstone setup saved from the screen.")
+    message = "Saved to " .. CONFIG_PATH .. " - run bec_controller to start."
+    draw()
+    os.sleep(1.5)
+    return true
+  end
+
+  draw()
+  while true do
+    local name, _, char, code = event.pull()
+    if name == "key_down" then
+      if code == 200 then
+        selected = (selected - 2) % rowCount + 1
+        message = nil
+      elseif code == 208 then
+        selected = selected % rowCount + 1
+        message = nil
+      elseif code == 203 or code == 205 or code == 28 then
+        local role = REDSTONE_ROLES[selected]
+        if role then
+          cycleRole(role, code == 203 and -1 or 1)
+        else
+          config.redstoneAutoAssign = not config.redstoneAutoAssign
+        end
+        message = nil
+      elseif code == 1 then
+        return false
+      elseif char == "s" or char == "S" then
+        if saveAndExit() then return true end
+      elseif char == "q" or char == "Q" then
+        return false
+      elseif char == "t" or char == "T" then
+        pulseSelected()
+      end
+      draw()
+    elseif name == "screen_resized" or name == "component_added" or name == "component_removed" then
+      draw()
+    end
+  end
+end
+
 local function readShrc()
   local file = io.open(SHRC_PATH, "r")
   if not file then return "" end
@@ -1265,6 +1494,35 @@ end
 local function handleError(err, context)
   if isInterrupted(err) then performShutdown() end
   fatalError("unexpected error" .. context .. ": " .. tostring(err))
+end
+
+local cliArgs = { ... }
+local function setupScreenRequested()
+  local function requested(args)
+    for _, value in ipairs(args or {}) do
+      if value == "config" or value == "--config" or value == "-c" then return true end
+    end
+    return false
+  end
+  return requested(cliArgs) or requested(type(arg) == "table" and arg or {})
+end
+
+if setupScreenRequested() then
+  loadConfig()
+  local ok, result = pcall(runRedstoneSetup)
+  if not ok then
+    if isInterrupted(result) then
+      print("Redstone setup cancelled.")
+    else
+      print("Redstone setup failed: " .. tostring(result))
+    end
+  elseif result then
+    print("Redstone configuration saved to " .. CONFIG_PATH .. ".")
+  elseif result == false then
+    print("Redstone setup closed without saving.")
+  end
+  pcall(logFile.close, logFile)
+  os.exit(0)
 end
 
 local startupOk, rebootForUpdate = pcall(startup)

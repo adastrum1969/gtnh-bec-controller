@@ -67,9 +67,17 @@ Two optional Redstone I/O signals can be added for automation around a batch. Bo
 - **Craft start** - pulses right before the IONodes are enabled and pull their items in.
 - **Craft end** - pulses once the batch is finished and cleaned up, whether or not the input drives are returned afterwards.
 
-If more than one Redstone I/O is connected to the computer, give each block its address in `config.cfg` (`redstoneReturnAddress`, `redstoneCraftStartAddress`, `redstoneCraftEndAddress`; run `components` in the OpenOS shell to list addresses). A signal without an address claims the first Redstone I/O that is still unused, so a setup with a single block keeps working unchanged and the two craft signals stay off until their blocks are added.
+If more than one Redstone I/O is connected to the computer, tell the controller which block does what with the setup screen. Stop the controller with Ctrl+Alt+C and run:
 
-To find out which block sits behind an address, set `identifyRedstone=true` in `config.cfg` and reboot: the controller pulses each Redstone I/O for 5 seconds in turn and shows the address it is pulsing on screen and in the log, so you can watch which wiring reacts. Set `identifyRedstone=false` again once the addresses are filled in. The addresses the controller settled on are printed on every startup anyway.
+```
+bec_controller config
+```
+
+The screen lists the three signals and every Redstone I/O the computer can see. Use Up/Down to pick a signal, Left/Right to choose the block, and **T** to pulse that signal for 3 seconds so you can watch which wiring reacts. **S** saves the addresses to `config.cfg`, **Q** leaves without saving. Start the controller again with `bec_controller` once the assignments match your wiring.
+
+A signal left unassigned claims the first unused Redstone I/O while auto-assign is on (the default), so a setup with a single block keeps working unchanged and the two craft signals stay off until their blocks are added. Select **Auto-assign unused blocks** on the screen to switch that off and leave unassigned signals off instead. The addresses can still be edited by hand in `config.cfg` (`redstoneReturnAddress`, `redstoneCraftStartAddress`, `redstoneCraftEndAddress`; run `components` in the OpenOS shell to list addresses).
+
+The older `identifyRedstone=true` config option still works as an alternative: it pulses each Redstone I/O for 5 seconds in turn on startup and shows the address on screen and in the log, so you can watch which wiring reacts.
 
 ### The Input Subnet (Magenta)
 
@@ -190,7 +198,8 @@ every startup and updates itself automatically if one's available.
 
 - Auto-run on startup can be disabled in config
 - Auto-update can be disabled in config
-- Craft start/end redstone signals can be assigned to specific Redstone I/O blocks in config
+- Redstone signals are assigned to specific Redstone I/O blocks in the in-game setup screen (`bec_controller config`)
+- `redstoneAutoAssign` in config decides whether unassigned signals claim free Redstone I/O blocks automatically
 - `identifyRedstone` in config pulses each Redstone I/O in turn to work out which block is which
 - Recipes that AE2 pushes back-to-back are picked up automatically: if the Input Subnet already holds the next recipe when a batch ends, the input drives stay in place and that recipe is crafted next
 - Discord Webhook integration can be setup in config.
